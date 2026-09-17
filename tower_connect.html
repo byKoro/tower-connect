@@ -1,0 +1,1334 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, maximum-scale=1.0">
+  <title>Tower Connect - Boss Fight</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: none;
+    }
+    body {
+      background-color: #0b0f19;
+      color: #fff;
+      font-family: system-ui, -apple-system, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      height: 100vh;
+      overflow: hidden;
+    }
+    header {
+      width: 100%;
+      max-width: 440px;
+      padding: 10px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .top-controls {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .status-text {
+      font-weight: 700;
+      font-size: 13px;
+      color: #38bdf8;
+    }
+    .btn-restart {
+      background: #ef4444;
+      color: #fff;
+      border: none;
+      padding: 6px 14px;
+      border-radius: 6px;
+      font-weight: bold;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .btn-restart:active {
+      transform: scale(0.95);
+    }
+    .boss-bar-container {
+      width: 100%;
+      height: 20px;
+      background: #1e293b;
+      border-radius: 10px;
+      border: 2px solid #475569;
+      overflow: hidden;
+      position: relative;
+    }
+    .boss-bar-fill {
+      height: 100%;
+      width: 100%;
+      background: linear-gradient(90deg, #f43f5e, #e11d48);
+      transition: width 0.1s linear;
+    }
+    .boss-bar-label {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      font-weight: 800;
+      text-shadow: 1px 1px 2px #000;
+    }
+    #game-container {
+      position: relative;
+      flex: 1;
+      width: 100%;
+      max-width: 440px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    #overlay-msg {
+      position: absolute;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: rgba(15, 23, 42, 0.94);
+      border: 2px solid #334155;
+      border-radius: 12px;
+      padding: 24px;
+      text-align: center;
+      pointer-events: none;
+    }
+    #overlay-title {
+      font-size: 26px;
+      margin-bottom: 6px;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="top-controls">
+      <div class="status-text" id="game-status">Conecte a primeira torreta!</div>
+      <button class="btn-restart" id="btn-restart">Reiniciar</button>
+    </div>
+    <div class="boss-bar-container">
+      <div class="boss-bar-fill" id="boss-bar-fill"></div>
+      <div class="boss-bar-label" id="boss-bar-text">BOSS: 1000 / 1000</div>
+    </div>
+  </header>
+
+  <div id="game-container">
+    <canvas id="gameCanvas"></canvas>
+    <div id="overlay-msg">
+      <h2 id="overlay-title">VITÓRIA!</h2>
+      <p id="overlay-sub">O Boss foi drenado!</p>
+    </div>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const bossFill = document.getElementById('boss-bar-fill');
+    const bossText = document.getElementById('boss-bar-text');
+    const gameStatus = document.getElementById('game-status');
+    const overlay = document.getElementById('overlay-msg');
+    const overlayTitle = document.getElementById('overlay-title');
+    const overlaySub = document.getElementById('overlay-sub');
+    const btnRestart = document.getElementById('btn-restart');
+
+    const BOSS_MAX_HP = 2500;
+    let currentGridSize = 4;
+    let animatedGridSize = 4;
+    let gridExpandProgress = 1; // 1 = concluído, 0 = iniciando transição suave
+    const CLICKS_TO_REPAIR = 8;
+    const WIRE_CLICKS_TO_REPAIR = 6;
+    const BOSS_ATTACK_INTERVAL = 4.5;
+    const WARNING_DURATION = 1.3;
+    const BEAM_FLASH_DURATION = 0.35; // Duração visual do raio cortando a tela
+
+    function easeOutCubic(t) {
+      return 1 - Math.pow(1 - t, 3);
+    }
+
+    let boss = { x: 0, y: 0, size: 65, hp: BOSS_MAX_HP };
+    let bullets = [];
+    let bossAttackTimer = BOSS_ATTACK_INTERVAL;
+    let bossCombatStarted = false;
+    let bossTelegraph = null; // { targets: [], timer, totalWarning }
+    let activeLaserBeams = []; // [ { x1, y1, x2, y2, timer } ]
+    let lastBossPhase = 1;
+
+    let gameOver = false;
+    let victory = false;
+
+    let board = [];
+    let paths = { 0: [], 1: [] };
+    let wireStatus = {
+      0: { isDamaged: false, repairClicks: 0 },
+      1: { isDamaged: false, repairClicks: 0 }
+    };
+    let activeDrawingBatteryId = null;
+
+    // Upgrades no grid: [ { r, c, type: 'missile'|'laser'|'shield' } ]
+    let upgradesOnGrid = [];
+    let upgradeSpawnTimer = 3.0;
+
+    let cellMetrics = { startX: 0, startY: 0, cellSize: 0 };
+    let lastTime = performance.now();
+
+    function resizeCanvas() {
+      const rect = canvas.parentElement.getBoundingClientRect();
+      canvas.width = rect.width;
+      canvas.height = rect.height;
+      updateMetrics();
+    }
+
+    function updateMetrics() {
+      boss.x = canvas.width / 2;
+      boss.y = 52;
+      boss.size = Math.min(canvas.width * 0.17, 60);
+
+      const topOffset = 110;
+      const bottomPadding = 20;
+      const availableHeight = canvas.height - topOffset - bottomPadding;
+      const availableWidth = canvas.width - 32;
+      const boardSide = Math.min(availableWidth, availableHeight);
+
+      const displaySize = animatedGridSize || currentGridSize;
+      cellMetrics.cellSize = boardSide / displaySize;
+      cellMetrics.startX = (canvas.width - boardSide) / 2;
+      cellMetrics.startY = topOffset + (availableHeight - boardSide) / 2;
+    }
+
+    function getCellCenter(r, c) {
+      return {
+        x: cellMetrics.startX + c * cellMetrics.cellSize + cellMetrics.cellSize / 2,
+        y: cellMetrics.startY + r * cellMetrics.cellSize + cellMetrics.cellSize / 2
+      };
+    }
+
+    function initGame() {
+      gameOver = false;
+      victory = false;
+      boss.hp = BOSS_MAX_HP;
+      bossAttackTimer = BOSS_ATTACK_INTERVAL;
+      bossCombatStarted = false;
+      bossTelegraph = null;
+      activeLaserBeams = [];
+      lastBossPhase = 1;
+      currentGridSize = 4;
+      animatedGridSize = 4;
+      gridExpandProgress = 1;
+      bullets = [];
+      paths = { 0: [], 1: [] };
+      wireStatus = {
+        0: { isDamaged: false, repairClicks: 0 },
+        1: { isDamaged: false, repairClicks: 0 }
+      };
+      upgradesOnGrid = [];
+      activeDrawingBatteryId = null;
+      overlay.style.display = 'none';
+      gameStatus.innerText = "Passe pelos upgrades para equipar torretas!";
+
+      board = [];
+      for (let r = 0; r < currentGridSize; r++) {
+        board[r] = [];
+        for (let c = 0; c < currentGridSize; c++) {
+          board[r][c] = {
+            r, c,
+            type: 'empty',
+            id: null,
+            isDestroyed: false,
+            repairClicks: 0,
+            connectedBatteryId: null,
+            upgrades: [], // Array com múltiplos upgrades fundidos
+            shootCooldown: 0.5
+          };
+        }
+      }
+
+      // Sorteia 2 baterias e 3 torretas
+      const positions = [];
+      for (let r = 0; r < currentGridSize; r++) {
+        for (let c = 0; c < currentGridSize; c++) {
+          positions.push({ r, c });
+        }
+      }
+      for (let i = positions.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [positions[i], positions[j]] = [positions[j], positions[i]];
+      }
+
+      for (let i = 0; i < 2; i++) {
+        const p = positions[i];
+        board[p.r][p.c].type = 'battery';
+        board[p.r][p.c].id = i;
+      }
+
+      for (let i = 2; i < 5; i++) {
+        const p = positions[i];
+        board[p.r][p.c].type = 'turret';
+        board[p.r][p.c].id = i - 2;
+      }
+
+      updateMetrics();
+      updateBossBar();
+
+      // Spawna até 3 upgrades iniciais
+      spawnUpgrade();
+      spawnUpgrade();
+      spawnUpgrade();
+    }
+
+    function isCellOccupiedByWire(r, c) {
+      for (let bId in paths) {
+        if (paths[bId] && paths[bId].some(p => p.r === r && p.c === c)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    function spawnUpgrade() {
+      if (upgradesOnGrid.length >= 3) return;
+
+      const emptyCells = [];
+      for (let r = 0; r < currentGridSize; r++) {
+        for (let c = 0; c < currentGridSize; c++) {
+          if (board[r][c].type === 'empty') {
+            const hasUpgrade = upgradesOnGrid.some(u => u.r === r && u.c === c);
+            const hasWire = isCellOccupiedByWire(r, c);
+            if (!hasUpgrade && !hasWire) {
+              emptyCells.push({ r, c });
+            }
+          }
+        }
+      }
+
+      if (emptyCells.length === 0) return;
+      const spot = emptyCells[Math.floor(Math.random() * emptyCells.length)];
+      const types = ['missile', 'laser', 'shield'];
+      const chosenType = types[Math.floor(Math.random() * types.length)];
+      upgradesOnGrid.push({ r: spot.r, c: spot.c, type: chosenType });
+    }
+
+    function expandGridTo5x5() {
+      if (currentGridSize === 5) return;
+      currentGridSize = 5;
+      gridExpandProgress = 0; // Inicia animação de transição suave de 0.8s
+
+      const oldBoard = board;
+      board = [];
+      for (let r = 0; r < 5; r++) {
+        board[r] = [];
+        for (let c = 0; c < 5; c++) {
+          if (oldBoard[r] && oldBoard[r][c]) {
+            board[r][c] = oldBoard[r][c];
+          } else {
+            board[r][c] = {
+              r, c,
+              type: 'empty',
+              id: null,
+              isDestroyed: false,
+              repairClicks: 0,
+              connectedBatteryId: null,
+              upgrades: [],
+              shootCooldown: 0.5
+            };
+          }
+        }
+      }
+
+      // Adiciona a 3ª Bateria (id: 2)
+      paths[2] = [];
+      wireStatus[2] = { isDamaged: false, repairClicks: 0 };
+
+      // IMPORTANTE: Seleciona apenas células totalmente livres (sem fios e sem upgrades!)
+      const safeEmptyCells = [];
+      for (let r = 0; r < 5; r++) {
+        for (let c = 0; c < 5; c++) {
+          if (board[r][c].type === 'empty') {
+            const hasUpgrade = upgradesOnGrid.some(u => u.r === r && u.c === c);
+            const hasWire = isCellOccupiedByWire(r, c);
+            if (!hasUpgrade && !hasWire) {
+              safeEmptyCells.push({ r, c });
+            }
+          }
+        }
+      }
+
+      if (safeEmptyCells.length > 0) {
+        // Dá prioridade para posições na borda recém-expandida (linha 4 ou coluna 4) se estiverem livres
+        const outerSafeCells = safeEmptyCells.filter(p => p.r === 4 || p.c === 4);
+        const pool = outerSafeCells.length > 0 ? outerSafeCells : safeEmptyCells;
+        const spot = pool[Math.floor(Math.random() * pool.length)];
+        board[spot.r][spot.c].type = 'battery';
+        board[spot.r][spot.c].id = 2;
+      }
+
+      updateMetrics();
+    }
+
+    function relocateTurret(turretCell) {
+      const savedId = turretCell.id;
+      const savedUpgrades = [...turretCell.upgrades];
+      const oldR = turretCell.r;
+      const oldC = turretCell.c;
+
+      if (turretCell.connectedBatteryId !== null) {
+        clearBatteryConnection(turretCell.connectedBatteryId);
+      }
+
+      // 1. Busca células 100% livres (sem fios, sem upgrades, sem outras entidades)
+      const safeEmptyCells = [];
+      for (let r = 0; r < currentGridSize; r++) {
+        for (let c = 0; c < currentGridSize; c++) {
+          if (r === oldR && c === oldC) continue;
+
+          if (board[r][c].type === 'empty') {
+            const hasUpgrade = upgradesOnGrid.some(u => u.r === r && u.c === c);
+            const hasWire = isCellOccupiedByWire(r, c);
+            if (!hasUpgrade && !hasWire) {
+              safeEmptyCells.push({ r, c });
+            }
+          }
+        }
+      }
+
+      let targetSpot;
+      if (safeEmptyCells.length > 0) {
+        // Esvazia a célula antiga
+        board[oldR][oldC] = {
+          r: oldR, c: oldC,
+          type: 'empty', id: null, isDestroyed: false, repairClicks: 0,
+          connectedBatteryId: null, upgrades: [], shootCooldown: 0.5
+        };
+        targetSpot = safeEmptyCells[Math.floor(Math.random() * safeEmptyCells.length)];
+      } else {
+        // "caso não haja local fique onde está"
+        targetSpot = { r: oldR, c: oldC };
+      }
+
+      // 2. Define a torreta na célula alvo mantendo seus upgrades!
+      board[targetSpot.r][targetSpot.c] = {
+        r: targetSpot.r, c: targetSpot.c,
+        type: 'turret',
+        id: savedId,
+        isDestroyed: false,
+        repairClicks: 0,
+        connectedBatteryId: null,
+        upgrades: savedUpgrades, // MANTÉM OS UPGRADES DA TORRETA!
+        shootCooldown: 0.5
+      };
+
+      upgradesOnGrid = upgradesOnGrid.filter(u => !(u.r === targetSpot.r && u.c === targetSpot.c));
+    }
+
+    function getBossPhase() {
+      const pct = boss.hp / BOSS_MAX_HP;
+      if (pct > 0.65) return 1;
+      if (pct > 0.30) return 2;
+      return 3;
+    }
+
+    function getBossAttackParams() {
+      const phase = getBossPhase();
+      if (phase === 1) {
+        return { targetsCount: 1, interval: BOSS_ATTACK_INTERVAL, warning: WARNING_DURATION };
+      } else if (phase === 2) {
+        return { targetsCount: 1, interval: 3.5, warning: 1.1 };
+      } else {
+        return { targetsCount: 2, interval: 2.6, warning: 0.9 };
+      }
+    }
+
+    function updateBossBar() {
+      const pct = Math.max(0, (boss.hp / BOSS_MAX_HP) * 100);
+      bossFill.style.width = pct + '%';
+
+      const phase = getBossPhase();
+      if (phase === 1) {
+        bossFill.style.background = 'linear-gradient(90deg, #a855f7, #7c3aed)';
+        bossText.innerText = `BOSS (FASE 1): ${Math.ceil(boss.hp)} / ${BOSS_MAX_HP}`;
+      } else if (phase === 2) {
+        bossFill.style.background = 'linear-gradient(90deg, #f97316, #ea580c)';
+        bossText.innerText = `BOSS ENFURECIDO (FASE 2): ${Math.ceil(boss.hp)} / ${BOSS_MAX_HP}`;
+      } else {
+        bossFill.style.background = 'linear-gradient(90deg, #ef4444, #dc2626)';
+        bossText.innerText = `🔥 BERSERK (FASE 3): ${Math.ceil(boss.hp)} / ${BOSS_MAX_HP}`;
+      }
+    }
+
+    function prepareBossAttack() {
+      const params = getBossAttackParams();
+      const livingTurrets = [];
+      for (let r = 0; r < currentGridSize; r++) {
+        for (let c = 0; c < currentGridSize; c++) {
+          const cell = board[r][c];
+          if (cell.type === 'turret' && !cell.isDestroyed) {
+            livingTurrets.push(cell);
+          }
+        }
+      }
+
+      if (livingTurrets.length === 0) return;
+
+      const selectedTargets = [];
+      const connected = livingTurrets.filter(t => t.connectedBatteryId !== null);
+
+      // Prioriza torretas conectadas que ainda não foram selecionadas
+      for (let t of connected) {
+        if (selectedTargets.length < params.targetsCount && !selectedTargets.includes(t)) {
+          selectedTargets.push(t);
+        }
+      }
+      // Completa com qualquer torreta viva
+      for (let t of livingTurrets) {
+        if (selectedTargets.length < params.targetsCount && !selectedTargets.includes(t)) {
+          selectedTargets.push(t);
+        }
+      }
+
+      bossTelegraph = {
+        targets: selectedTargets,
+        timer: params.warning,
+        totalWarning: params.warning
+      };
+    }
+
+    // Disparo dos Raio Direcionais do Boss (Suporta múltiplos disparos simultâneos)
+    function executeBossLaser(targets) {
+      bossTelegraph = null;
+      activeLaserBeams = [];
+
+      targets.forEach(targetCell => {
+        const targetPos = getCellCenter(targetCell.r, targetCell.c);
+
+        const dirX = targetPos.x - boss.x;
+        const dirY = targetPos.y - boss.y;
+        const len = Math.hypot(dirX, dirY) || 1;
+        const endX = boss.x + (dirX / len) * (canvas.height * 1.2);
+        const endY = boss.y + (dirY / len) * (canvas.height * 1.2);
+
+        activeLaserBeams.push({
+          x1: boss.x, y1: boss.y,
+          x2: endX, y2: endY,
+          timer: BEAM_FLASH_DURATION
+        });
+
+        // Aplica dano na torreta alvo
+        if (!targetCell.isDestroyed) {
+          if (targetCell.upgrades.includes('shield')) {
+            targetCell.upgrades = targetCell.upgrades.filter(u => u !== 'shield');
+            gameStatus.innerText = "🛡️ O Escudo absorveu o raio do Boss!";
+          } else {
+            targetCell.isDestroyed = true;
+            targetCell.repairClicks = 0;
+            targetCell.upgrades = [];
+            if (targetCell.connectedBatteryId !== null) {
+              wireStatus[targetCell.connectedBatteryId].isDamaged = true;
+            }
+          }
+        }
+      });
+
+      // Checa derrota
+      let allDead = true;
+      for (let r = 0; r < currentGridSize; r++) {
+        for (let c = 0; c < currentGridSize; c++) {
+          if (board[r][c].type === 'turret' && !board[r][c].isDestroyed) {
+            allDead = false;
+          }
+        }
+      }
+      if (allDead) {
+        triggerGameOver(false);
+      }
+    }
+
+    function triggerGameOver(won) {
+      if (gameOver) return;
+      gameOver = true;
+      activeDrawingBatteryId = null;
+      bossTelegraph = null;
+      overlay.style.display = 'flex';
+      if (won) {
+        victory = true;
+        overlayTitle.innerText = "VITÓRIA!";
+        overlayTitle.style.color = "#4ade80";
+        overlaySub.innerText = "O Boss foi destruído!";
+      } else {
+        overlayTitle.innerText = "DERROTA!";
+        overlayTitle.style.color = "#f87171";
+        overlaySub.innerText = "Todas as torretas foram destruídas.";
+      }
+    }
+
+    function update(dt) {
+      if (gameOver) return;
+
+      // Animação de transição suave da expansão do Grid
+      if (gridExpandProgress < 1) {
+        gridExpandProgress = Math.min(1, gridExpandProgress + dt / 0.8);
+        const t = easeOutCubic(gridExpandProgress);
+        animatedGridSize = 4 + (currentGridSize - 4) * t;
+        updateMetrics();
+      } else {
+        animatedGridSize = currentGridSize;
+      }
+
+      // Spawn periódico de upgrades
+      upgradeSpawnTimer -= dt;
+      if (upgradeSpawnTimer <= 0) {
+        spawnUpgrade();
+        upgradeSpawnTimer = 4.0;
+      }
+
+      // Transição de Fases do Boss
+      const currentPhase = getBossPhase();
+      if (currentPhase !== lastBossPhase) {
+        lastBossPhase = currentPhase;
+        if (currentPhase === 2) {
+          expandGridTo5x5();
+          gameStatus.innerText = "⚡ FASE 2: GRID EXPANDIDO PARA 5x5! Nova Bateria ativada!";
+        } else if (currentPhase === 3) {
+          gameStatus.innerText = "🔥 FASE 3: MODO BERSERK! Ataques devastadores e ultra rápidos!";
+        }
+      }
+
+      // Lógica de Combate do Boss
+      if (bossCombatStarted) {
+        const params = getBossAttackParams();
+        if (bossTelegraph) {
+          bossTelegraph.timer -= dt;
+          if (bossTelegraph.timer <= 0) {
+            const targets = bossTelegraph.targets;
+            executeBossLaser(targets);
+            bossAttackTimer = params.interval;
+          }
+        } else {
+          bossAttackTimer -= dt;
+          if (bossAttackTimer <= 0) {
+            prepareBossAttack();
+          }
+        }
+      }
+
+      // Duração dos feixes de laser do boss (Múltiplos lasers)
+      for (let i = activeLaserBeams.length - 1; i >= 0; i--) {
+        activeLaserBeams[i].timer -= dt;
+        if (activeLaserBeams[i].timer <= 0) {
+          activeLaserBeams.splice(i, 1);
+        }
+      }
+
+      // Torretas conectadas atacando
+      for (let r = 0; r < currentGridSize; r++) {
+        for (let c = 0; c < currentGridSize; c++) {
+          const cell = board[r][c];
+          if (cell.type === 'turret' && !cell.isDestroyed && cell.connectedBatteryId !== null && !wireStatus[cell.connectedBatteryId].isDamaged) {
+            const pos = getCellCenter(r, c);
+
+            const hasLaser = cell.upgrades.includes('laser');
+            const hasMissile = cell.upgrades.includes('missile');
+
+            if (hasLaser && hasMissile) {
+              // SUPER LASER (Feixe devastador grosso com 85 DPS)
+              boss.hp = Math.max(0, boss.hp - (85 * dt));
+              updateBossBar();
+              if (boss.hp <= 0) {
+                triggerGameOver(true);
+                return;
+              }
+            } else if (hasLaser) {
+              // FEIXE CONTÍNUO A LASER (24 DPS)
+              boss.hp = Math.max(0, boss.hp - (24 * dt));
+              updateBossBar();
+              if (boss.hp <= 0) {
+                triggerGameOver(true);
+                return;
+              }
+            } else if (hasMissile) {
+              // MÍSSIL: Lento, mas 55 de dano
+              cell.shootCooldown -= dt;
+              if (cell.shootCooldown <= 0) {
+                cell.shootCooldown = 1.2; // Cadência mais lenta
+                bullets.push({ x: pos.x, y: pos.y, radius: 9, damage: 55, speed: 280, isMissile: true });
+              }
+            } else {
+              // TIRO PADRÃO
+              cell.shootCooldown -= dt;
+              if (cell.shootCooldown <= 0) {
+                cell.shootCooldown = 0.45;
+                bullets.push({ x: pos.x, y: pos.y, radius: 5, damage: 16, speed: 460, isMissile: false });
+              }
+            }
+          }
+        }
+      }
+
+      // Atualiza Projéteis do Jogador
+      for (let i = bullets.length - 1; i >= 0; i--) {
+        const b = bullets[i];
+        const dx = boss.x - b.x;
+        const dy = boss.y - b.y;
+        const dist = Math.hypot(dx, dy);
+
+        if (dist < boss.size * 0.55) {
+          boss.hp = Math.max(0, boss.hp - b.damage);
+          updateBossBar();
+          bullets.splice(i, 1);
+          if (boss.hp <= 0) {
+            triggerGameOver(true);
+            return;
+          }
+        } else {
+          const step = b.speed * dt;
+          b.x += (dx / dist) * step;
+          b.y += (dy / dist) * step;
+        }
+      }
+    }
+
+    function isBatteryConnectedToDestroyed(bId) {
+      for (let r = 0; r < currentGridSize; r++) {
+        for (let c = 0; c < currentGridSize; c++) {
+          const cell = board[r][c];
+          if (cell.type === 'turret' && cell.connectedBatteryId === bId && cell.isDestroyed) {
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const cs = cellMetrics.cellSize;
+
+      // Destaque de Brilho nos Grids por onde passam os fios
+      for (let r = 0; r < currentGridSize; r++) {
+        for (let c = 0; c < currentGridSize; c++) {
+          let isGlowing = false;
+          let isDamagedWire = false;
+
+          for (let bId in paths) {
+            if (paths[bId] && paths[bId].some(p => p.r === r && p.c === c)) {
+              isGlowing = true;
+              if (wireStatus[bId] && wireStatus[bId].isDamaged) {
+                isDamagedWire = true;
+              }
+            }
+          }
+
+          if (isGlowing) {
+            const x = cellMetrics.startX + c * cs;
+            const y = cellMetrics.startY + r * cs;
+
+            ctx.save();
+            if (isDamagedWire) {
+              ctx.fillStyle = 'rgba(239, 68, 68, 0.28)';
+              ctx.fillRect(x + 2, y + 2, cs - 4, cs - 4);
+              ctx.strokeStyle = 'rgba(239, 68, 68, 0.7)';
+            } else {
+              ctx.fillStyle = 'rgba(56, 189, 248, 0.22)';
+              ctx.fillRect(x + 2, y + 2, cs - 4, cs - 4);
+              ctx.strokeStyle = 'rgba(56, 189, 248, 0.6)';
+            }
+            ctx.lineWidth = 2;
+            ctx.strokeRect(x + 3, y + 3, cs - 6, cs - 6);
+            ctx.restore();
+          }
+        }
+      }
+
+      // Grade
+      ctx.strokeStyle = '#1e293b';
+      ctx.lineWidth = 1.5;
+      for (let r = 0; r <= currentGridSize; r++) {
+        ctx.save();
+        if (r === currentGridSize && gridExpandProgress < 1) {
+          ctx.globalAlpha = Math.min(1, gridExpandProgress * 1.5);
+        }
+        ctx.beginPath();
+        ctx.moveTo(cellMetrics.startX, cellMetrics.startY + r * cs);
+        ctx.lineTo(cellMetrics.startX + currentGridSize * cs, cellMetrics.startY + r * cs);
+        ctx.stroke();
+        ctx.restore();
+      }
+      for (let c = 0; c <= currentGridSize; c++) {
+        ctx.save();
+        if (c === currentGridSize && gridExpandProgress < 1) {
+          ctx.globalAlpha = Math.min(1, gridExpandProgress * 1.5);
+        }
+        ctx.beginPath();
+        ctx.moveTo(cellMetrics.startX + c * cs, cellMetrics.startY);
+        ctx.lineTo(cellMetrics.startX + c * cs, cellMetrics.startY + currentGridSize * cs);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      // Upgrades no Grid
+      upgradesOnGrid.forEach(u => {
+        const pos = getCellCenter(u.r, u.c);
+        const rad = cs * 0.28;
+
+        ctx.save();
+        if ((u.r === 4 || u.c === 4) && gridExpandProgress < 1) {
+          ctx.globalAlpha = Math.min(1, gridExpandProgress * 1.5);
+        }
+        ctx.translate(pos.x, pos.y);
+
+        if (u.type === 'missile') {
+          ctx.fillStyle = '#f97316';
+          ctx.beginPath();
+          ctx.arc(0, 0, rad, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = '#fff';
+          ctx.font = 'bold 12px system-ui';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText('M', 0, 0);
+        } else if (u.type === 'laser') {
+          ctx.fillStyle = '#06b6d4';
+          ctx.beginPath();
+          ctx.arc(0, 0, rad, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = '#fff';
+          ctx.font = 'bold 12px system-ui';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText('L', 0, 0);
+        } else if (u.type === 'shield') {
+          ctx.fillStyle = '#3b82f6';
+          ctx.beginPath();
+          ctx.arc(0, 0, rad, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = '#fff';
+          ctx.font = 'bold 12px system-ui';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText('E', 0, 0);
+        }
+        ctx.restore();
+      });
+
+      // Linhas / Fios - Suporte dinâmico a múltiplas baterias
+      const normalColors = { 0: '#00f0ff', 1: '#00f0ff', 2: '#00f0ff' };
+      const bIds = Object.keys(paths).map(Number);
+      bIds.forEach(bId => {
+        const path = paths[bId];
+        if (path && path.length > 1) {
+          const isBroken = isBatteryConnectedToDestroyed(bId);
+          const isDamaged = wireStatus[bId] && wireStatus[bId].isDamaged;
+
+          ctx.beginPath();
+          const first = getCellCenter(path[0].r, path[0].c);
+          ctx.moveTo(first.x, first.y);
+          for (let i = 1; i < path.length; i++) {
+            const pt = getCellCenter(path[i].r, path[i].c);
+            ctx.lineTo(pt.x, pt.y);
+          }
+
+          if (isDamaged || isBroken) {
+            ctx.strokeStyle = '#ef4444';
+            ctx.lineWidth = 5;
+            ctx.setLineDash([8, 6]);
+          } else {
+            ctx.strokeStyle = normalColors[bId] || '#00f0ff';
+            ctx.lineWidth = 6;
+            ctx.setLineDash([]);
+          }
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      });
+
+      // INDICADOR DE MIRA DO BOSS (Suporta múltiplos alvos por Fase)
+      if (bossTelegraph && bossTelegraph.targets) {
+        bossTelegraph.targets.forEach(targetCell => {
+          const targetPos = getCellCenter(targetCell.r, targetCell.c);
+          const progress = 1 - (bossTelegraph.timer / bossTelegraph.totalWarning);
+
+          ctx.save();
+          ctx.beginPath();
+          ctx.moveTo(boss.x, boss.y);
+          ctx.lineTo(targetPos.x, targetPos.y);
+          ctx.strokeStyle = `rgba(239, 68, 68, ${0.4 + 0.6 * Math.sin(Date.now() / 60)})`;
+          ctx.lineWidth = 3;
+          ctx.setLineDash([8, 6]);
+          ctx.stroke();
+
+          ctx.beginPath();
+          const reticleRadius = cs * (0.8 - 0.4 * progress);
+          ctx.arc(targetPos.x, targetPos.y, reticleRadius, 0, Math.PI * 2);
+          ctx.strokeStyle = '#ef4444';
+          ctx.lineWidth = 2.5;
+          ctx.setLineDash([]);
+          ctx.stroke();
+          ctx.restore();
+        });
+      }
+
+      // DISPAROS DOS RAIOS LASER DO BOSS (Múltiplos lasers)
+      activeLaserBeams.forEach(beam => {
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(beam.x1, beam.y1);
+        ctx.lineTo(beam.x2, beam.y2);
+        ctx.strokeStyle = '#ff0033';
+        ctx.lineWidth = 14;
+        ctx.shadowColor = '#ff2255';
+        ctx.shadowBlur = 20;
+        ctx.stroke();
+
+        // Núcleo branco intenso do laser
+        ctx.beginPath();
+        ctx.moveTo(beam.x1, beam.y1);
+        ctx.lineTo(beam.x2, beam.y2);
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 5;
+        ctx.stroke();
+        ctx.restore();
+      });
+
+      // Renderização do Boss com Cores por Fase
+      ctx.save();
+      ctx.translate(boss.x, boss.y);
+
+      const phase = getBossPhase();
+      let bossColor = '#7c3aed';
+      let bossStroke = '#ef4444';
+
+      if (phase === 2) {
+        bossColor = '#ea580c';
+        bossStroke = '#fbbf24';
+      } else if (phase === 3) {
+        bossColor = '#dc2626';
+        bossStroke = '#ff0033';
+        ctx.shadowColor = '#ef4444';
+        ctx.shadowBlur = 20;
+      }
+
+      if (bossTelegraph) {
+        bossStroke = '#ff0055';
+      }
+
+      ctx.fillStyle = bossColor;
+      ctx.strokeStyle = bossStroke;
+      ctx.lineWidth = bossTelegraph ? 5 : 3;
+      const s = boss.size;
+      ctx.fillRect(-s / 2, -s / 2, s, s);
+      ctx.strokeRect(-s / 2, -s / 2, s, s);
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(-s * 0.28, -s * 0.15, s * 0.18, s * 0.18);
+      ctx.fillRect(s * 0.1, -s * 0.15, s * 0.18, s * 0.18);
+      ctx.restore();
+
+      // Feixe do Laser do Jogador (Normal ou Super Laser - Apenas se o fio NÃO estiver danificado)
+      for (let r = 0; r < currentGridSize; r++) {
+        for (let c = 0; c < currentGridSize; c++) {
+          const cell = board[r][c];
+          if (cell.type === 'turret' && cell.connectedBatteryId !== null && !cell.isDestroyed && wireStatus[cell.connectedBatteryId] && !wireStatus[cell.connectedBatteryId].isDamaged) {
+            const pos = getCellCenter(r, c);
+            const hasLaser = cell.upgrades.includes('laser');
+            const hasMissile = cell.upgrades.includes('missile');
+
+            if (hasLaser && hasMissile) {
+              // SUPER LASER (Feixe muito mais grosso, reluzente com aura laranja/ciano)
+              ctx.save();
+              ctx.beginPath();
+              ctx.moveTo(pos.x, pos.y);
+              ctx.lineTo(boss.x, boss.y);
+              ctx.strokeStyle = '#f97316';
+              ctx.lineWidth = 15;
+              ctx.shadowColor = '#ea580c';
+              ctx.shadowBlur = 25;
+              ctx.stroke();
+
+              ctx.beginPath();
+              ctx.moveTo(pos.x, pos.y);
+              ctx.lineTo(boss.x, boss.y);
+              ctx.strokeStyle = '#06b6d4';
+              ctx.lineWidth = 8;
+              ctx.shadowColor = '#22d3ee';
+              ctx.shadowBlur = 15;
+              ctx.stroke();
+
+              ctx.beginPath();
+              ctx.moveTo(pos.x, pos.y);
+              ctx.lineTo(boss.x, boss.y);
+              ctx.strokeStyle = '#ffffff';
+              ctx.lineWidth = 3;
+              ctx.stroke();
+              ctx.restore();
+            } else if (hasLaser) {
+              // LASER NORMAL
+              ctx.save();
+              ctx.beginPath();
+              ctx.moveTo(pos.x, pos.y);
+              ctx.lineTo(boss.x, boss.y);
+              ctx.strokeStyle = '#06b6d4';
+              ctx.lineWidth = 4;
+              ctx.shadowColor = '#22d3ee';
+              ctx.shadowBlur = 10;
+              ctx.stroke();
+              ctx.restore();
+            } else {
+              // Linha guia discreta
+              ctx.beginPath();
+              ctx.moveTo(pos.x, pos.y);
+              ctx.lineTo(boss.x, boss.y);
+              ctx.strokeStyle = 'rgba(74, 222, 128, 0.2)';
+              ctx.lineWidth = 1.5;
+              ctx.setLineDash([4, 4]);
+              ctx.stroke();
+              ctx.setLineDash([]);
+            }
+          }
+        }
+      }
+
+      // Tiros / Mísseis do jogador
+      bullets.forEach(b => {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
+        if (b.isMissile) {
+          ctx.fillStyle = '#f97316';
+          ctx.shadowColor = '#ea580c';
+          ctx.shadowBlur = 10;
+        } else {
+          ctx.fillStyle = '#4ade80';
+          ctx.shadowColor = '#4ade80';
+          ctx.shadowBlur = 8;
+        }
+        ctx.fill();
+        ctx.restore();
+      });
+
+      // Células (Baterias e Torretas)
+      for (let r = 0; r < currentGridSize; r++) {
+        for (let c = 0; c < currentGridSize; c++) {
+          const cell = board[r][c];
+          const pos = getCellCenter(r, c);
+          const rad = cs * 0.32;
+
+          const isNewCell = (r === 4 || c === 4 || (cell.type === 'battery' && cell.id === 2)) && gridExpandProgress < 1;
+
+          ctx.save();
+          if (isNewCell) {
+            ctx.globalAlpha = Math.min(1, gridExpandProgress * 1.5);
+            const scale = 0.4 + 0.6 * easeOutCubic(Math.min(1, gridExpandProgress * 1.2));
+            ctx.translate(pos.x, pos.y);
+            ctx.scale(scale, scale);
+            ctx.translate(-pos.x, -pos.y);
+          }
+
+          if (cell.type === 'battery') {
+            ctx.beginPath();
+            ctx.arc(pos.x, pos.y, rad, 0, Math.PI * 2);
+            ctx.fillStyle = normalColors[cell.id] || '#00f0ff';
+            ctx.fill();
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 2.5;
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.arc(pos.x, pos.y, rad * 0.35, 0, Math.PI * 2);
+            ctx.fillStyle = '#0f172a';
+            ctx.fill();
+
+          } else if (cell.type === 'turret') {
+            const color = cell.isDestroyed ? '#ef4444' : '#22c55e';
+            const border = cell.isDestroyed ? '#991b1b' : '#15803d';
+
+            // Escudo protetor ao redor da torreta
+            if (cell.upgrades.includes('shield') && !cell.isDestroyed) {
+              ctx.beginPath();
+              ctx.arc(pos.x, pos.y, rad * 1.35, 0, Math.PI * 2);
+              ctx.strokeStyle = '#38bdf8';
+              ctx.lineWidth = 3;
+              ctx.fillStyle = 'rgba(56, 189, 248, 0.25)';
+              ctx.fill();
+              ctx.stroke();
+            }
+
+            // Triângulo da Torreta
+            ctx.beginPath();
+            ctx.moveTo(pos.x, pos.y - rad);
+            ctx.lineTo(pos.x + rad * 0.9, pos.y + rad * 0.8);
+            ctx.lineTo(pos.x - rad * 0.9, pos.y + rad * 0.8);
+            ctx.closePath();
+
+            ctx.fillStyle = color;
+            ctx.fill();
+            ctx.lineWidth = 2.5;
+            ctx.strokeStyle = border;
+            ctx.stroke();
+
+            // Ícones dos Upgrades na Torreta
+            if (cell.upgrades.length > 0 && !cell.isDestroyed) {
+              ctx.fillStyle = '#fff';
+              ctx.font = 'bold 11px system-ui';
+              ctx.textAlign = 'center';
+
+              let tags = [];
+              if (cell.upgrades.includes('laser') && cell.upgrades.includes('missile')) {
+                tags.push('💥');
+              } else if (cell.upgrades.includes('laser')) {
+                tags.push('⚡');
+              } else if (cell.upgrades.includes('missile')) {
+                tags.push('🚀');
+              }
+              if (cell.upgrades.includes('shield')) {
+                tags.push('🛡️');
+              }
+
+              ctx.fillText(tags.join(' '), pos.x, pos.y + 6);
+            }
+
+            // Status de cliques e reparo
+            if (cell.isDestroyed) {
+              const barW = cs * 0.8;
+              const barH = 7;
+              const barX = pos.x - barW / 2;
+              const barY = pos.y - rad - 14;
+
+              ctx.fillStyle = '#1e293b';
+              ctx.fillRect(barX, barY, barW, barH);
+
+              const progress = cell.repairClicks / CLICKS_TO_REPAIR;
+              ctx.fillStyle = '#38bdf8';
+              ctx.fillRect(barX, barY, barW * Math.max(0, Math.min(1, progress)), barH);
+
+              ctx.strokeStyle = '#fff';
+              ctx.lineWidth = 1;
+              ctx.strokeRect(barX, barY, barW, barH);
+
+              const remaining = CLICKS_TO_REPAIR - cell.repairClicks;
+              ctx.fillStyle = '#fbbf24';
+              ctx.font = 'bold 11px system-ui';
+              ctx.textAlign = 'center';
+              ctx.fillText(`${remaining}x TOQUES!`, pos.x, barY - 4);
+            }
+          }
+          ctx.restore();
+        }
+      }
+    }
+
+    function gameLoop(now) {
+      const dt = Math.min((now - lastTime) / 1000, 0.1);
+      lastTime = now;
+      update(dt);
+      draw();
+      requestAnimationFrame(gameLoop);
+    }
+
+    function getGridCoord(x, y) {
+      const cs = cellMetrics.cellSize;
+      const c = Math.floor((x - cellMetrics.startX) / cs);
+      const r = Math.floor((y - cellMetrics.startY) / cs);
+      if (r >= 0 && r < currentGridSize && c >= 0 && c < currentGridSize) {
+        return { r, c };
+      }
+      return null;
+    }
+
+    function handlePointerDown(x, y) {
+      if (gameOver) return;
+      const coord = getGridCoord(x, y);
+      if (!coord) return;
+
+      const cell = board[coord.r][coord.c];
+
+      // Toque para arrumar a torreta quebrada (Conserta e MOVE APENAS ELA mantendo upgrades!)
+      if (cell.type === 'turret' && cell.isDestroyed) {
+        cell.repairClicks++;
+
+        if (cell.repairClicks >= CLICKS_TO_REPAIR) {
+          cell.isDestroyed = false;
+          cell.repairClicks = 0;
+
+          // Move APENAS a torreta consertada mantendo seus upgrades!
+          relocateTurret(cell);
+          gameStatus.innerText = "⚡ Torreta consertada! Ela se moveu para uma nova posição mantendo seus upgrades!";
+        }
+        return;
+      }
+
+      // Puxar fio da bateria
+      if (cell.type === 'battery') {
+        const bId = cell.id;
+        if (isBatteryConnectedToDestroyed(bId) || wireStatus[bId].isDamaged) {
+          gameStatus.innerText = "Conserte a torreta destruída para liberar esta bateria!";
+          return;
+        }
+
+        clearBatteryConnection(bId);
+        activeDrawingBatteryId = bId;
+        paths[bId] = [{ r: coord.r, c: coord.c }];
+      }
+    }
+
+    function handlePointerMove(x, y) {
+      if (activeDrawingBatteryId === null) return;
+      const coord = getGridCoord(x, y);
+      if (!coord) return;
+
+      const path = paths[activeDrawingBatteryId];
+      const lastCell = path[path.length - 1];
+
+      if (lastCell.r === coord.r && lastCell.c === coord.c) return;
+
+      if (path.length > 1) {
+        const secondLast = path[path.length - 2];
+        if (secondLast.r === coord.r && secondLast.c === coord.c) {
+          path.pop();
+          return;
+        }
+      }
+
+      const dr = Math.abs(coord.r - lastCell.r);
+      const dc = Math.abs(coord.c - lastCell.c);
+      if (!((dr === 1 && dc === 0) || (dr === 0 && dc === 1))) return;
+
+      if (path.some(p => p.r === coord.r && p.c === coord.c)) return;
+
+      const otherBId = activeDrawingBatteryId === 0 ? 1 : 0;
+      if (paths[otherBId].some(p => p.r === coord.r && p.c === coord.c)) return;
+
+      const targetCell = board[coord.r][coord.c];
+
+      if (targetCell.type === 'battery') return;
+      if (targetCell.type === 'turret' && targetCell.isDestroyed) return;
+
+      if (targetCell.type === 'turret') {
+        if (targetCell.connectedBatteryId !== null && targetCell.connectedBatteryId !== activeDrawingBatteryId) {
+          return;
+        }
+        path.push({ r: coord.r, c: coord.c });
+        targetCell.connectedBatteryId = activeDrawingBatteryId;
+
+        // VERIFICA SE O CAMINHO PASSOU POR UPGRADES
+        let collected = [];
+        path.forEach(step => {
+          const upIdx = upgradesOnGrid.findIndex(u => u.r === step.r && u.c === step.c);
+          if (upIdx !== -1) {
+            const upType = upgradesOnGrid[upIdx].type;
+            if (!targetCell.upgrades.includes(upType)) {
+              targetCell.upgrades.push(upType);
+            }
+            collected.push(upType.toUpperCase());
+            upgradesOnGrid.splice(upIdx, 1);
+          }
+        });
+
+        if (collected.length > 0) {
+          const names = targetCell.upgrades.map(u => u.toUpperCase()).join(' + ');
+          gameStatus.innerText = `Upgrades fundidos: ${names}!`;
+        }
+
+        activeDrawingBatteryId = null;
+
+        if (!bossCombatStarted) {
+          bossCombatStarted = true;
+          bossAttackTimer = BOSS_ATTACK_INTERVAL;
+          gameStatus.innerText = "Boss enfurecido! Cuidado com os raios!";
+        }
+        return;
+      }
+
+      if (targetCell.type === 'empty') {
+        path.push({ r: coord.r, c: coord.c });
+      }
+    }
+
+    function handlePointerUp() {
+      if (activeDrawingBatteryId !== null) {
+        const path = paths[activeDrawingBatteryId];
+        const lastCell = path[path.length - 1];
+        const endNode = board[lastCell.r][lastCell.c];
+
+        if (endNode.type !== 'turret') {
+          paths[activeDrawingBatteryId] = [];
+        }
+        activeDrawingBatteryId = null;
+      }
+    }
+
+    function clearBatteryConnection(bId) {
+      paths[bId] = [];
+      wireStatus[bId] = { isDamaged: false, repairClicks: 0 };
+      for (let r = 0; r < currentGridSize; r++) {
+        for (let c = 0; c < currentGridSize; c++) {
+          if (board[r][c].type === 'turret' && board[r][c].connectedBatteryId === bId) {
+            board[r][c].connectedBatteryId = null;
+            // Preserva os upgrades da torreta! Ela mantém seus upgrades acumulados mesmo desconectada.
+          }
+        }
+      }
+    }
+
+    function getPointerPos(e) {
+      const rect = canvas.getBoundingClientRect();
+      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+      return { x: clientX - rect.left, y: clientY - rect.top };
+    }
+
+    canvas.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      const p = getPointerPos(e);
+      handlePointerDown(p.x, p.y);
+    }, { passive: false });
+
+    window.addEventListener('touchmove', (e) => {
+      if (activeDrawingBatteryId !== null) {
+        const p = getPointerPos(e);
+        handlePointerMove(p.x, p.y);
+      }
+    }, { passive: false });
+
+    window.addEventListener('touchend', () => { handlePointerUp(); }, { passive: false });
+
+    canvas.addEventListener('mousedown', (e) => {
+      const p = getPointerPos(e);
+      handlePointerDown(p.x, p.y);
+    });
+
+    window.addEventListener('mousemove', (e) => {
+      if (activeDrawingBatteryId !== null) {
+        const p = getPointerPos(e);
+        handlePointerMove(p.x, p.y);
+      }
+    });
+
+    window.addEventListener('mouseup', () => { handlePointerUp(); });
+
+    btnRestart.addEventListener('click', initGame);
+    window.addEventListener('resize', resizeCanvas);
+
+    resizeCanvas();
+    initGame();
+    requestAnimationFrame((time) => {
+      lastTime = time;
+      gameLoop(time);
+    });
+  </script>
+</body>
+</html>
